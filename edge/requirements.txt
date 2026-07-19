@@ -1,0 +1,4 @@
+paho-mqtt>=2.0
+# only needed if EDGE_SOURCE=redis (co-located slice); harmless otherwise:
+redis>=5.0
+asyncpg>=0.29

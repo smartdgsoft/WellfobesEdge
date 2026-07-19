@@ -1,0 +1,20 @@
+# Central platform side (SKU-2). EMQX broker + historian subscriber.
+# Assumes a TimescaleDB reachable at POSTGRES_DSN (your existing one, or add one).
+services:
+  emqx:
+    image: emqx/emqx:5              # open source, Apache-2.0
+    ports: ["1883:1883", "18083:18083"]   # mqtt + dashboard
+    volumes:
+      - ./infra/emqx/emqx.conf:/opt/emqx/etc/emqx.conf:ro
+
+  historian:
+    build:
+      context: ..
+      dockerfile: center/Dockerfile
+    depends_on: [emqx]
+    environment:
+      - MQTT_HOST=emqx
+      - MQTT_PORT=1883
+      - SUB_SITE=+
+      - SUB_GATEWAY=+
+      - POSTGRES_DSN=postgresql://opcua_admin:PASS@<your-timescaledb>:5432/opcua

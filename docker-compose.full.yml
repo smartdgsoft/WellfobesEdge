@@ -1,0 +1,25 @@
+# Full stack (SKU-2) — edge gateway + EMQX + historian, one command.
+# For a real run, add/point at a TimescaleDB and set POSTGRES_DSN on historian.
+services:
+  emqx:
+    image: emqx/emqx:5
+    ports: ["1883:1883", "18083:18083"]
+    volumes:
+      - ./center/infra/emqx/emqx.conf:/opt/emqx/etc/emqx.conf:ro
+
+  edge-gateway:
+    build: { context: ., dockerfile: edge/Dockerfile }
+    depends_on: [emqx]
+    environment:
+      - MQTT_HOST=emqx
+      - EDGE_SITE=PLANT12
+      - EDGE_GATEWAY=GW-A
+      - EDGE_SOURCE=simulated
+
+  historian:
+    build: { context: ., dockerfile: center/Dockerfile }
+    depends_on: [emqx]
+    environment:
+      - MQTT_HOST=emqx
+      - SUB_SITE=+
+      - POSTGRES_DSN=postgresql://opcua_admin:PASS@<your-timescaledb>:5432/opcua

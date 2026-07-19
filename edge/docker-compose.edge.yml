@@ -1,0 +1,25 @@
+# SKU-1 standalone edge. Build context is the REPO ROOT so the Dockerfile can
+# read shared/, but it copies only shared/ + edge/ — never center/.
+#   docker compose -f edge/docker-compose.edge.yml up --build
+#
+# For a real customer deployment you typically DON'T run this broker — you point
+# EDGE at the customer's own broker (set MQTT_HOST/PORT) or their MES's Sparkplug
+# endpoint. The mosquitto here is just so the slice runs on a laptop out of the box.
+services:
+  mqtt:
+    image: eclipse-mosquitto:2
+    ports: ["1883:1883"]
+    command: ["sh", "-c", "printf 'listener 1883\\nallow_anonymous true\\n' > /m.conf && exec mosquitto -c /m.conf"]
+
+  edge-gateway:
+    build:
+      context: ..
+      dockerfile: edge/Dockerfile
+    depends_on: [mqtt]
+    environment:
+      - MQTT_HOST=mqtt
+      - MQTT_PORT=1883
+      - EDGE_SITE=PLANT12
+      - EDGE_GATEWAY=GW-A
+      - EDGE_SOURCE=simulated
+      - EDGE_KEEPALIVE_S=30

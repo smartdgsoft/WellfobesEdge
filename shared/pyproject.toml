@@ -1,0 +1,13 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "wellfobes-contract"
+version = "0.1.0"
+description = "Wire contract (identity + Sparkplug-B codec) shared by the Wellfobes edge gateway and central platform."
+requires-python = ">=3.10"
+dependencies = []   # deliberately none — this must stay dependency-free in both directions
+
+[tool.setuptools]
+packages = ["wellfobes_contract"]
