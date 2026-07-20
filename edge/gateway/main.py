@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 import os
 import signal
-from typing import Dict
+from typing import Dict, Optional
 
 import paho.mqtt.client as mqtt
 
@@ -21,6 +21,7 @@ from wellfobes_contract import (
 )
 from gateway.sources import build_source
 from gateway.buffer import DeliveryBuffer
+from gateway.config_client import ConfigClient, apply_config
 
 
 SITE = os.getenv("EDGE_SITE", "PLANT12")
@@ -34,6 +35,7 @@ BUFFER_PATH = os.getenv("EDGE_BUFFER_PATH", "/data/outbox.db")
 BUFFER_MAX_ROWS = int(os.getenv("EDGE_BUFFER_MAX_ROWS", "500000"))
 FLUSH_INTERVAL_S = float(os.getenv("EDGE_FLUSH_INTERVAL_S", "1.0"))
 BATCH_MAX = int(os.getenv("EDGE_BATCH_MAX", "200"))
+CONFIG_URL = os.getenv("EDGE_CONFIG_URL", "")   # empty -> pure env config (SKU-1)
 
 
 class EdgeGateway:
@@ -58,12 +60,18 @@ class EdgeGateway:
         self.buffer = DeliveryBuffer(BUFFER_PATH, max_rows=BUFFER_MAX_ROWS)
         self._inflight: set[int] = set()   # batch_seqs published, awaiting ack
         self._pending: Dict[str, list] = {}   # per-device readings not yet buffered
+        self.config_client = ConfigClient(CONFIG_URL, SITE, GATEWAY)
+        self._config_version: Optional[int] = None
 
     def _on_connect(self, client, userdata, flags, rc):
         if rc == 0:
             self._publish_nbirth()
             # Listen for this gateway's delivery acks (center -> edge).
             client.subscribe(self.node.dack_topic(), qos=1)
+            # Reconnect = a chance the desired config changed while we were gone.
+            # Pull on the loop thread to avoid blocking the MQTT callback.
+            if self._loop:
+                self._loop.call_soon_threadsafe(self._pull_and_apply_config)
             # On (re)connect, anything still buffered is un-acked -> allow resend.
             self._inflight.clear()
             if self._loop:
@@ -123,8 +131,29 @@ class EdgeGateway:
         self.client.publish(self.node.ddata_topic(device),
                             self.codec.encode(p), qos=1, retain=False)
 
+    def _pull_and_apply_config(self):
+        """Pull this gateway's config from the center and apply what we
+        understand. Falls back silently to env defaults if the center is
+        unreachable or has nothing published. Then report our running version."""
+        version, cfg = self.config_client.pull()
+        if cfg is not None:
+            applied = apply_config(cfg)
+            # apply the runtime knobs we support today
+            if "keepalive_s" in applied:
+                self.rbe.keepalive_s = applied["keepalive_s"]
+            if "deadband" in applied:
+                self.rbe.deadband = applied["deadband"]
+            self._config_version = version
+            print(f"[config] applied version {version}: {applied}", flush=True)
+        else:
+            print("[config] running on env defaults (no central config)", flush=True)
+        # report actual running version (None if on env defaults)
+        self.config_client.report(self._config_version)
+
     async def run(self):
         self._loop = asyncio.get_event_loop()
+        # Management plane: pull config before we start publishing.
+        self._pull_and_apply_config()
         # Reconnecting client: paho auto-reconnects, redelivering on the will/birth.
         self.client.connect_async(BROKER_HOST, BROKER_PORT, keepalive=30)
         self.client.loop_start()

@@ -32,7 +32,6 @@ services:
 
   edge-gateway:
     build: { context: ., dockerfile: edge/Dockerfile }
-    depends_on: [mqtt]
     environment:
       - MQTT_HOST=mqtt          # <-- same broker the historian subscribes to
       - MQTT_PORT=1883
@@ -41,8 +40,25 @@ services:
       - EDGE_SOURCE=simulated
       - EDGE_KEEPALIVE_S=30
       - EDGE_BUFFER_PATH=/data/outbox.db   # durable buffer (survives restart)
+      - EDGE_CONFIG_URL=http://config-service:8080   # management plane
+    depends_on: [mqtt, config-service]
     volumes:
       - edge_buffer:/data
+
+  edge-gateway-plant30:
+    build: { context: ., dockerfile: edge/Dockerfile }
+    depends_on: [mqtt, config-service]
+    environment:
+      - MQTT_HOST=mqtt
+      - MQTT_PORT=1883
+      - EDGE_SITE=PLANT30
+      - EDGE_GATEWAY=GW-A
+      - EDGE_SOURCE=simulated
+      - EDGE_KEEPALIVE_S=30
+      - EDGE_BUFFER_PATH=/data/outbox.db
+      - EDGE_CONFIG_URL=http://config-service:8080
+    volumes:
+      - edge_buffer_p30:/data
 
   historian:
     build: { context: ., dockerfile: center/Dockerfile }
@@ -56,6 +72,16 @@ services:
       - SUB_GATEWAY=+
       - POSTGRES_DSN=postgresql://wellfobes:wellfobes@timescaledb:5432/fleet
 
+  config-service:
+    build: { context: ., dockerfile: center/Dockerfile }
+    command: ["uvicorn", "config_service.main:app", "--host", "0.0.0.0", "--port", "8080"]
+    depends_on:
+      timescaledb: { condition: service_healthy }
+    ports: ["8080:8080"]
+    environment:
+      - POSTGRES_DSN=postgresql://wellfobes:wellfobes@timescaledb:5432/fleet
+
 volumes:
   fleet_pgdata:
   edge_buffer:
+  edge_buffer_p30:

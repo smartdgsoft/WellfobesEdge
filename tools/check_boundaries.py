@@ -6,6 +6,8 @@ Rules:
   * edge/   may import   shared/   — never center/
   * center/ may import   shared/   — never edge/
   * shared/ may import   NEITHER edge/ nor center/   (it's the neutral contract)
+  * integration/ (not a shipped zone) may import both — it's cross-zone tests
+    that never deploy; it's intentionally not checked here.
 
 Run in CI and locally (`make check`). A violation exits non-zero with the exact
 file and import, so the coupling is caught the moment it's introduced — not
