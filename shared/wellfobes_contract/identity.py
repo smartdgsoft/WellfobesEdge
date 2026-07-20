@@ -26,6 +26,10 @@ NBIRTH = "NBIRTH"   # edge node came online (announces itself + metric aliases)
 NDEATH = "NDEATH"   # edge node went offline (via MQTT will message)
 DBIRTH = "DBIRTH"   # a device under the node came online
 DDATA = "DDATA"     # a device reported values (report-by-exception)
+# Phase 2: ack flowing center -> edge, confirming a history batch is durably
+# stored so the edge can release it from its buffer. Not a standard Sparkplug
+# message type — our extension on the same topic namespace.
+DACK = "DACK"
 
 # A site/gateway/device id must be safe in an MQTT topic: no wildcards, no
 # separators, no whitespace. Keep it strict so identity can't be spoofed by a
@@ -67,6 +71,15 @@ class NodeIdentity:
 
     def ddata_topic(self, device: str) -> str:
         return self.topic(DDATA, device)
+
+    def dack_topic(self) -> str:
+        # center publishes acks here; this gateway subscribes to its own.
+        return self.topic(DACK)
+
+
+def ack_topic_for(site: str, gateway: str) -> str:
+    """The DACK topic a given gateway listens on (center publishes here)."""
+    return f"{SPB_NAMESPACE}/{site}/{DACK}/{gateway}"
 
 
 def subscribe_pattern(site: str = "+", gateway: str = "+") -> str:

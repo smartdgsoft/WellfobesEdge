@@ -12,12 +12,13 @@ what lets the center recognise the format instead of silently mis-parsing.
 Bump it only on a breaking wire change.
 """
 from .identity import (                                  # noqa: F401
-    SPB_NAMESPACE, NBIRTH, NDEATH, DBIRTH, DDATA,
-    NodeIdentity, MetricKey, parse_topic, subscribe_pattern, valid_id,
+    SPB_NAMESPACE, NBIRTH, NDEATH, DBIRTH, DDATA, DACK,
+    NodeIdentity, MetricKey, parse_topic, subscribe_pattern, ack_topic_for, valid_id,
 )
 from .sparkplug import (                                 # noqa: F401
     PROTOCOL_VERSION, Metric, Payload, Codec, JsonCodec, DEFAULT_CODEC,
     SeqCounter, RBEState, now_ms, UnsupportedProtocolVersion,
+    encode_ack, decode_ack,
 )
 
 __version__ = "0.1.0"

@@ -40,6 +40,9 @@ services:
       - EDGE_GATEWAY=GW-A
       - EDGE_SOURCE=simulated
       - EDGE_KEEPALIVE_S=30
+      - EDGE_BUFFER_PATH=/data/outbox.db   # durable buffer (survives restart)
+    volumes:
+      - edge_buffer:/data
 
   historian:
     build: { context: ., dockerfile: center/Dockerfile }
@@ -55,3 +58,4 @@ services:
 
 volumes:
   fleet_pgdata:
+  edge_buffer:

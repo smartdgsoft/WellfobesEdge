@@ -17,8 +17,10 @@ import paho.mqtt.client as mqtt
 
 from wellfobes_contract import (
     DEFAULT_CODEC, Metric, NodeIdentity, Payload, RBEState, SeqCounter, now_ms,
+    decode_ack,
 )
 from gateway.sources import build_source
+from gateway.buffer import DeliveryBuffer
 
 
 SITE = os.getenv("EDGE_SITE", "PLANT12")
@@ -28,6 +30,10 @@ BROKER_PORT = int(os.getenv("MQTT_PORT", "1883"))
 SOURCE = os.getenv("EDGE_SOURCE", "simulated")
 KEEPALIVE_S = float(os.getenv("EDGE_KEEPALIVE_S", "30"))
 DEADBAND = float(os.getenv("EDGE_DEADBAND", "0"))
+BUFFER_PATH = os.getenv("EDGE_BUFFER_PATH", "/data/outbox.db")
+BUFFER_MAX_ROWS = int(os.getenv("EDGE_BUFFER_MAX_ROWS", "500000"))
+FLUSH_INTERVAL_S = float(os.getenv("EDGE_FLUSH_INTERVAL_S", "1.0"))
+BATCH_MAX = int(os.getenv("EDGE_BATCH_MAX", "200"))
 
 
 class EdgeGateway:
@@ -44,16 +50,38 @@ class EdgeGateway:
         self.client.will_set(self.node.ndeath_topic(),
                              self.codec.encode(death), qos=1, retain=False)
         self.client.on_connect = self._on_connect
+        self.client.on_message = self._on_message      # acks come back here
         self._connected = asyncio.Event()
         self._loop = None
+        # Durable history buffer. Survives restart; released only on center ack.
+        os.makedirs(os.path.dirname(BUFFER_PATH) or ".", exist_ok=True)
+        self.buffer = DeliveryBuffer(BUFFER_PATH, max_rows=BUFFER_MAX_ROWS)
+        self._inflight: set[int] = set()   # batch_seqs published, awaiting ack
+        self._pending: Dict[str, list] = {}   # per-device readings not yet buffered
 
     def _on_connect(self, client, userdata, flags, rc):
         if rc == 0:
             self._publish_nbirth()
+            # Listen for this gateway's delivery acks (center -> edge).
+            client.subscribe(self.node.dack_topic(), qos=1)
+            # On (re)connect, anything still buffered is un-acked -> allow resend.
+            self._inflight.clear()
             if self._loop:
                 self._loop.call_soon_threadsafe(self._connected.set)
             else:
                 self._connected.set()
+
+    def _on_message(self, client, userdata, msg):
+        """Ack handler (paho network thread). Releases the acked batch from the
+        durable buffer — the only place buffer rows are deleted after delivery."""
+        try:
+            batch_seq = decode_ack(msg.payload)
+        except Exception:
+            return
+        freed = self.buffer.ack(batch_seq)
+        self._inflight.discard(batch_seq)
+        if freed:
+            print(f"[gateway] ack batch {batch_seq} -> released {freed} rows", flush=True)
 
     def _publish_nbirth(self):
         p = Payload(seq=self.seq.reset(), timestamp_ms=now_ms(), metrics=[])
@@ -72,29 +100,96 @@ class EdgeGateway:
         self.client.publish(self.node.dbirth_topic(device),
                             self.codec.encode(p), qos=1, retain=False)
 
-    def _publish_ddata(self, device: str, tag: str, value: float,
-                       quality: int, ts_ms: int):
+    def _publish_live(self, device: str, tag: str, value: float,
+                      quality: int, ts_ms: int):
+        """Live, ephemeral DDATA — QoS 0, no batch_seq, not buffered."""
         alias = self._aliases.get(device, {}).get(tag)
         m = Metric(name=tag, value=value, timestamp_ms=ts_ms, alias=alias, quality=quality)
         p = Payload(seq=self.seq.next(), timestamp_ms=now_ms(), metrics=[m])
         self.client.publish(self.node.ddata_topic(device),
                             self.codec.encode(p), qos=0, retain=False)
 
+    def _publish_history_batch(self, device: str, seq: int,
+                               rows: list) -> None:
+        """Publish a durable history batch: QoS 1, tagged with batch_seq so the
+        center can ack it. The rows stay in the buffer until that ack arrives."""
+        metrics = []
+        for (tag, value, quality, ts_ms) in rows:
+            alias = self._aliases.get(device, {}).get(tag)
+            metrics.append(Metric(name=tag, value=value, timestamp_ms=ts_ms,
+                                  alias=alias, quality=quality))
+        p = Payload(seq=self.seq.next(), timestamp_ms=now_ms(),
+                    metrics=metrics, batch_seq=seq)
+        self.client.publish(self.node.ddata_topic(device),
+                            self.codec.encode(p), qos=1, retain=False)
+
     async def run(self):
         self._loop = asyncio.get_event_loop()
-        self.client.connect(BROKER_HOST, BROKER_PORT, keepalive=30)
+        # Reconnecting client: paho auto-reconnects, redelivering on the will/birth.
+        self.client.connect_async(BROKER_HOST, BROKER_PORT, keepalive=30)
         self.client.loop_start()
-        await self._connected.wait()
 
         source = build_source(SOURCE)
         seen: Dict[str, set[str]] = {}
-        async for device, tag, value, quality, ts_ms in source.stream():
-            tags = seen.setdefault(device, set())
-            if tag not in tags:
-                tags.add(tag)
-                self._publish_dbirth(device, list(tags))
-            if self.rbe.should_send(f"{device}/{tag}", value):
-                self._publish_ddata(device, tag, value, quality, ts_ms)
+        drainer = asyncio.create_task(self._drain_loop())
+        try:
+            async for device, tag, value, quality, ts_ms in source.stream():
+                tags = seen.setdefault(device, set())
+                if tag not in tags:
+                    tags.add(tag)
+                    # DBIRTH only meaningful once connected; if offline it's
+                    # re-sent on reconnect via on_connect clearing state.
+                    if self._connected.is_set():
+                        self._publish_dbirth(device, list(tags))
+                # Report-by-exception governs WHAT we emit.
+                if self.rbe.should_send(f"{device}/{tag}", value):
+                    # LIVE path: publish immediately, fire-and-forget (QoS 0),
+                    # newest-wins. A consumer watching live sees fresh values even
+                    # while history is still draining. Dropped on congestion —
+                    # that's fine, history (below) is the durable copy.
+                    if self._connected.is_set():
+                        self._publish_live(device, tag, value, quality, ts_ms)
+                    # HISTORY path: accumulate into a durable batch.
+                    self._pending.setdefault(device, []).append((tag, value, quality, ts_ms))
+                    if len(self._pending[device]) >= BATCH_MAX:
+                        self._enqueue(device, self._pending.pop(device))
+            # (simulated source never ends; real sources loop)
+        finally:
+            drainer.cancel()
+
+    def _enqueue(self, device: str, rows: list):
+        """Persist a batch to disk (durable). Device travels with each row, so
+        the drain loop needs no extra bookkeeping."""
+        self.buffer.append([(device, t, v, q, ts) for (t, v, q, ts) in rows])
+
+    async def _drain_loop(self):
+        """Every FLUSH_INTERVAL_S: flush any partial pending batch to disk, then
+        (re)publish all un-acked buffered batches. Un-acked batches are resent —
+        that's what makes an outage lossless: they stay on disk until the center
+        acks, and get republished each cycle until then."""
+        while True:
+            await asyncio.sleep(FLUSH_INTERVAL_S)
+            # Flush any partial in-memory batch to the durable buffer on the
+            # timer, so low-rate tags don't wait for BATCH_MAX to persist.
+            for dev in list(self._pending.keys()):
+                rows = self._pending.pop(dev)
+                if rows:
+                    self._enqueue(dev, rows)
+            if not self._connected.is_set():
+                continue                    # offline: keep buffering, don't publish
+            # Publish every pending (un-acked) batch, oldest first.
+            for seq in self.buffer.pending_batches():
+                rows = self.buffer.batch_rows(seq)   # (device,tag,value,quality,ts)
+                if not rows:
+                    continue
+                # rows share a device (we enqueue per device)
+                device = rows[0][0]
+                hist = [(t, v, q, ts) for (_d, t, v, q, ts) in rows]
+                self._publish_history_batch(device, seq, hist)
+                self._inflight.add(seq)
+            b, r = self.buffer.depth()
+            if b:
+                print(f"[gateway] buffer depth: {b} batches / {r} rows un-acked", flush=True)
 
 
 async def _amain():

@@ -7,7 +7,9 @@ import paho.mqtt.client as mqtt
 from wellfobes_contract import parse_topic, DEFAULT_CODEC, DBIRTH, DDATA, NBIRTH, NDEATH
 
 PORT = os.getenv("MQTT_PORT", "18840")
+import tempfile
 os.environ.update({"MQTT_HOST":"localhost","MQTT_PORT":PORT,
+    "EDGE_BUFFER_PATH": tempfile.mkdtemp()+"/outbox.db",
     "EDGE_SITE":"PLANT30","EDGE_GATEWAY":"GW-B","EDGE_SOURCE":"simulated",
     "EDGE_KEEPALIVE_S":"2","EDGE_DEADBAND":"0"})
 

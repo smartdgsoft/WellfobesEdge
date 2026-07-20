@@ -68,10 +68,14 @@ class Metric:
 
 @dataclass
 class Payload:
-    """A Sparkplug payload: a sequence number, a timestamp, and metrics."""
+    """A Sparkplug payload: a sequence number, a timestamp, and metrics.
+
+    `batch_seq` (Phase 2) identifies a durable history batch for the end-to-end
+    ack. None for live/ephemeral DDATA that isn't buffered."""
     seq: int
     timestamp_ms: int
     metrics: List[Metric] = field(default_factory=list)
+    batch_seq: Optional[int] = None
 
 
 # ── codec (pluggable — JSON now, protobuf later) ─────────────────────────────
@@ -94,6 +98,7 @@ class JsonCodec(Codec):
             "seq": payload.seq,
             "timestamp": payload.timestamp_ms,
             "metrics": [m.to_dict() for m in payload.metrics],
+            **({"batch_seq": payload.batch_seq} if payload.batch_seq is not None else {}),
         }, separators=(",", ":")).encode()
 
     def decode(self, raw: bytes) -> Payload:
@@ -107,6 +112,7 @@ class JsonCodec(Codec):
             seq=int(d["seq"]),
             timestamp_ms=int(d.get("timestamp", 0)),
             metrics=[Metric.from_dict(m) for m in d.get("metrics", [])],
+            batch_seq=d.get("batch_seq"),
         )
 
 
@@ -123,6 +129,19 @@ class ProtobufCodecNotYetImplemented(Codec):
 
     def decode(self, raw: bytes) -> Payload:
         raise NotImplementedError
+
+
+def encode_ack(batch_seq: int) -> bytes:
+    return json.dumps({"v": PROTOCOL_VERSION, "batch_seq": int(batch_seq)},
+                      separators=(",", ":")).encode()
+
+
+def decode_ack(raw: bytes) -> int:
+    d = json.loads(raw.decode())
+    v = int(d.get("v", 1))
+    if v > PROTOCOL_VERSION:
+        raise UnsupportedProtocolVersion(f"ack v{v} > supported v{PROTOCOL_VERSION}")
+    return int(d["batch_seq"])
 
 
 DEFAULT_CODEC = JsonCodec()

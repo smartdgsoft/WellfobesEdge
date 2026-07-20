@@ -20,7 +20,7 @@ import paho.mqtt.client as mqtt
 
 from wellfobes_contract import (
     DBIRTH, DDATA, NBIRTH, NDEATH, MetricKey, parse_topic, subscribe_pattern,
-    DEFAULT_CODEC,
+    DEFAULT_CODEC, ack_topic_for,
 )
 
 
@@ -76,16 +76,29 @@ class Historian:
 
         if msg_type == DDATA and device:
             amap = self._aliases.get((site, gateway, device), {})
+            rows = []
             for m in payload.metrics:
                 # Resolve the tag name: prefer explicit name, else the alias map.
                 tag = m.name or amap.get(m.alias or -1)
                 if not tag:
                     continue             # can't identify -> skip (never guess)
                 key = MetricKey(site=site, gateway=gateway, device=device, tag=tag)
-                self.writer(key, m.value, m.quality, m.timestamp_ms)
+                rows.append((key, m.value, m.quality, m.timestamp_ms))
+
+            # Write the whole batch. Only ack (release the edge's buffer) if the
+            # DB write reports success — that's the end-to-end guarantee.
+            batch_seq = payload.batch_seq
+            ok = self.writer(rows, gateway=gateway, batch_seq=batch_seq)
+            if ok and batch_seq is not None:
+                self._publish_ack(site, gateway, batch_seq)
 
     def writer_death(self, site: str, gateway: str):
         print(f"[historian] node offline: {site}/{gateway}", flush=True)
+
+    def _publish_ack(self, site: str, gateway: str, batch_seq: int):
+        from wellfobes_contract import encode_ack
+        self.client.publish(ack_topic_for(site, gateway),
+                            encode_ack(batch_seq), qos=1, retain=False)
 
     def run_forever(self):
         self.client.connect(BROKER_HOST, BROKER_PORT, keepalive=30)
@@ -120,22 +133,35 @@ class TimescaleWriter:
                 time.sleep(2)
         raise RuntimeError(f"could not reach database within {timeout_s}s: {last}")
 
-    def __call__(self, key: MetricKey, value: Optional[float],
-                 quality: Optional[int], ts_ms: int):
-        if value is None:
-            return
+    def __call__(self, rows, gateway: str = None, batch_seq=None) -> bool:
+        """Write a whole batch idempotently. Returns True only if the batch is
+        durably committed — the historian acks the edge only on True, so a
+        failed write means the edge keeps the data and redelivers.
+
+        ON CONFLICT DO NOTHING makes a redelivered batch (after a lost ack) a
+        no-op instead of duplicate rows — at-least-once in flight, effectively
+        exactly-once at rest."""
+        rows = [(k, v, q, ts) for (k, v, q, ts) in rows if v is not None]
+        if not rows:
+            return True                    # nothing to write == success
         try:
             with self._conn.cursor() as cur:
-                cur.execute(
+                cur.executemany(
                     """INSERT INTO edge_values
-                           (site, gateway, device, tag, value, quality, ts)
-                       VALUES (%s,%s,%s,%s,%s,%s, to_timestamp(%s/1000.0))""",
-                    (key.site, key.gateway, key.device, key.tag,
-                     value, quality, ts_ms))
+                           (site, gateway, device, tag, value, quality, ts, batch_seq)
+                       VALUES (%s,%s,%s,%s,%s,%s, to_timestamp(%s/1000.0), %s)
+                       ON CONFLICT (gateway, batch_seq, device, tag, ts) DO NOTHING""",
+                    [(k.site, k.gateway, k.device, k.tag, v, q, ts, batch_seq)
+                     for (k, v, q, ts) in rows])
+            return True
         except Exception as exc:
-            # connection dropped -> reconnect once and retry; never crash the sub
-            print(f"[historian] write failed ({exc}); reconnecting", flush=True)
-            self._connect_with_retry(30)
+            # Write failed -> DON'T ack; reconnect and let the edge redeliver.
+            print(f"[historian] batch write failed ({exc}); reconnecting", flush=True)
+            try:
+                self._connect_with_retry(30)
+            except Exception:
+                pass
+            return False
 
 
 def main():

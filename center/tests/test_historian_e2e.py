@@ -13,7 +13,11 @@ hist = importlib.util.module_from_spec(spec); spec.loader.exec_module(hist)
 
 def test():
     captured = []
-    h = hist.Historian(lambda k,v,q,ts: captured.append((k.path, v, q)))
+    def capture(rows, gateway=None, batch_seq=None):
+        for (k, v, q, ts) in rows:
+            captured.append((k.path, v, q))
+        return True
+    h = hist.Historian(capture)
     h.client.connect("localhost", PORT, 30); h.client.loop_start(); time.sleep(0.5)
 
     node = NodeIdentity("PLANT12","GW-A"); c = DEFAULT_CODEC; seq = SeqCounter(); dev="SiemensPlc1200"
