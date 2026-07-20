@@ -54,18 +54,20 @@ center's job (WEP-001 §4, "buffer for delivery, never for retrieval").
 
 ## Broker
 
-**EMQX** (open source, Apache-2.0) at the center — it clusters, which the fleet
-needs at scale. **Mosquitto** for local dev and the test suite. Everything is
-broker-agnostic (plain MQTT via paho + Sparkplug on top), so the choice is
-config, not code — the pipe was verified on Mosquitto and behaves identically on
-EMQX.
+**Mosquitto** (EPL/EDL, genuinely open source) — the pipe is proven against it,
+and it carries no licensing cloud. Note on EMQX: it moved to the BSL license at
+v5.9.0 (no longer open source), and the last Apache-2.0 line (5.8.x) is frozen —
+so it's deliberately avoided here per the no-licensed-broker requirement.
+Mosquitto is single-node; when multi-site scale needs clustering, revisit
+(NanoMQ, HiveMQ CE, or pinned EMQX 5.8). Everything is broker-agnostic (plain
+MQTT via paho + Sparkplug on top), so that swap is config, not code.
 
 ## Quick start
 
 ```bash
 make install                        # installs shared/ + deps
 make check                          # boundary guard
-# run the whole slice locally (edge + EMQX + historian):
+# run the whole slice locally (edge + Mosquitto + historian):
 docker compose -f docker-compose.full.yml up --build
 
 # or just the standalone edge (SKU-1):

@@ -1,10 +1,10 @@
 # Running the full loop (SKU-2) — land the data end to end
 
-Brings up the complete pipe in one command, self-contained (its own EMQX and
+Brings up the complete pipe in one command, self-contained (its own Mosquitto broker and
 TimescaleDB — nothing external):
 
 ```
-edge gateway  ->  EMQX  ->  historian  ->  TimescaleDB (edge_values)
+edge gateway  ->  Mosquitto  ->  historian  ->  TimescaleDB (edge_values)
 ```
 
 ## 1. Stop the edge-only stack (it has its own broker; the full stack has its own)
@@ -19,7 +19,7 @@ cd edge && docker compose -f docker-compose.edge.yml down && cd ..
 docker compose -f docker-compose.full.yml up -d --build
 ```
 
-First run pulls TimescaleDB + EMQX and auto-applies the migration. Give it ~15s.
+First run pulls TimescaleDB + Mosquitto and auto-applies the migration. Give it ~15s.
 
 ## 3. Watch it work
 
@@ -63,15 +63,18 @@ docker compose -f docker-compose.full.yml exec timescaledb \
 ```
 One site now; the same query rolls up 50 later — that's why site is first-class.
 
-## 4. EMQX dashboard (optional)
+## 4. Watch the raw broker traffic (optional)
 
-http://<host>:18083  (default admin / public) — see the connected gateway,
-topics, throughput.
+```bash
+docker compose -f docker-compose.full.yml exec mqtt \
+  mosquitto_sub -t 'spBv1.0/#' -v
+```
+Shows the Sparkplug messages flowing through the broker in real time.
 
 ## Notes
 
-- **Same broker is the point.** Edge publishes to `emqx`; historian subscribes to
-  `emqx`. In the edge-only stack they were different brokers, so nothing landed —
+- **Same broker is the point.** Edge publishes to `mqtt`; historian subscribes to
+  `mqtt`. In the edge-only stack they were different brokers, so nothing landed —
   correct for SKU-1 (edge is a pipe), but for the loop they must share one.
 - **DB on host port 5433** to avoid clashing with your production Postgres.
 - **To use your real TimescaleDB:** drop the `timescaledb` service and point

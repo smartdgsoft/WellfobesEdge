@@ -14,8 +14,8 @@ fall out for free (WEP-001 §9).
 - `historian/main.py` — MQTT subscribe → decode → write. Handles birth/death,
   learns aliases at DBIRTH, resolves them in DDATA.
 - `infra/migrations/030_edge_values.sql` — the site-first hypertable.
-- `infra/emqx/emqx.conf` — EMQX (open source) broker config. Harden before prod
-  (WEP-001 §10): disable anonymous, per-gateway auth, TLS, cluster.
+- Broker: Mosquitto (open source), configured inline in the compose file.
+  Harden before prod (WEP-001 §10): disable anonymous, per-gateway auth, TLS.
 
 ## Run
 

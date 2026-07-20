@@ -1,18 +1,17 @@
-# Central platform (SKU-2) — self-contained: TimescaleDB + EMQX + historian.
-# One command, nothing external:
+# Central platform (SKU-2) — self-contained: TimescaleDB + Mosquitto + historian.
 #   docker compose -f center/docker-compose.center.yml up -d --build
 #
-# The DB auto-applies the migration on first start (infra/initdb/*.sql).
-# To use YOUR existing TimescaleDB instead, delete the `timescaledb` service and
-# point historian's POSTGRES_DSN at it.
+# Mosquitto (open source) as broker — see docker-compose.full.yml for the EMQX
+# licensing note. To use your existing TimescaleDB, delete the timescaledb
+# service and point historian's POSTGRES_DSN at it.
 services:
   timescaledb:
-    image: timescale/timescaledb:2.17.2-pg16
+    image: timescale/timescaledb:latest-pg16
     environment:
       - POSTGRES_USER=wellfobes
       - POSTGRES_PASSWORD=wellfobes
       - POSTGRES_DB=fleet
-    ports: ["5433:5432"]        # 5433 on host to avoid clashing with your prod PG
+    ports: ["5433:5432"]
     volumes:
       - ./infra/initdb:/docker-entrypoint-initdb.d:ro
       - fleet_pgdata:/var/lib/postgresql/data
@@ -22,11 +21,10 @@ services:
       timeout: 3s
       retries: 20
 
-  emqx:
-    image: emqx/emqx:5
-    ports: ["1883:1883", "18083:18083"]   # mqtt + dashboard (admin/public)
-    volumes:
-      - ./infra/emqx/emqx.conf:/opt/emqx/etc/emqx.conf:ro
+  mqtt:
+    image: eclipse-mosquitto:2
+    ports: ["1883:1883"]
+    command: ["sh", "-c", "printf 'listener 1883\\nallow_anonymous true\\n' > /m.conf && exec mosquitto -c /m.conf"]
 
   historian:
     build:
@@ -34,9 +32,9 @@ services:
       dockerfile: center/Dockerfile
     depends_on:
       timescaledb: { condition: service_healthy }
-      emqx:        { condition: service_started }
+      mqtt:        { condition: service_started }
     environment:
-      - MQTT_HOST=emqx
+      - MQTT_HOST=mqtt
       - MQTT_PORT=1883
       - SUB_SITE=+
       - SUB_GATEWAY=+
