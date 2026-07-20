@@ -150,7 +150,7 @@ class TimescaleWriter:
                     """INSERT INTO edge_values
                            (site, gateway, device, tag, value, quality, ts, batch_seq)
                        VALUES (%s,%s,%s,%s,%s,%s, to_timestamp(%s/1000.0), %s)
-                       ON CONFLICT (gateway, batch_seq, device, tag, ts) DO NOTHING""",
+                       ON CONFLICT (site, gateway, batch_seq, device, tag, ts) DO NOTHING""",
                     [(k.site, k.gateway, k.device, k.tag, v, q, ts, batch_seq)
                      for (k, v, q, ts) in rows])
             return True
