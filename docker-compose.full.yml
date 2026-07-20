@@ -1,9 +1,30 @@
-# Full stack (SKU-2) — edge gateway + EMQX + historian, one command.
-# For a real run, add/point at a TimescaleDB and set POSTGRES_DSN on historian.
+# Full stack (SKU-2) — the complete loop in one command:
+#   edge gateway  ->  EMQX broker  ->  historian  ->  TimescaleDB
+#
+#   docker compose -f docker-compose.full.yml up -d --build
+#
+# Self-contained: brings its own TimescaleDB (auto-migrated) and EMQX. Nothing
+# external needed. This is the "watch data flow end to end" demo.
 services:
+  timescaledb:
+    image: timescale/timescaledb:2.17.2-pg16
+    environment:
+      - POSTGRES_USER=wellfobes
+      - POSTGRES_PASSWORD=wellfobes
+      - POSTGRES_DB=fleet
+    ports: ["5433:5432"]
+    volumes:
+      - ./center/infra/initdb:/docker-entrypoint-initdb.d:ro
+      - fleet_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U wellfobes -d fleet"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
   emqx:
     image: emqx/emqx:5
-    ports: ["1883:1883", "18083:18083"]
+    ports: ["1883:1883", "18083:18083"]   # mqtt + dashboard
     volumes:
       - ./center/infra/emqx/emqx.conf:/opt/emqx/etc/emqx.conf:ro
 
@@ -11,15 +32,24 @@ services:
     build: { context: ., dockerfile: edge/Dockerfile }
     depends_on: [emqx]
     environment:
-      - MQTT_HOST=emqx
+      - MQTT_HOST=emqx          # <-- same broker the historian subscribes to
+      - MQTT_PORT=1883
       - EDGE_SITE=PLANT12
       - EDGE_GATEWAY=GW-A
       - EDGE_SOURCE=simulated
+      - EDGE_KEEPALIVE_S=30
 
   historian:
     build: { context: ., dockerfile: center/Dockerfile }
-    depends_on: [emqx]
+    depends_on:
+      timescaledb: { condition: service_healthy }
+      emqx:        { condition: service_started }
     environment:
       - MQTT_HOST=emqx
+      - MQTT_PORT=1883
       - SUB_SITE=+
-      - POSTGRES_DSN=postgresql://opcua_admin:PASS@<your-timescaledb>:5432/opcua
+      - SUB_GATEWAY=+
+      - POSTGRES_DSN=postgresql://wellfobes:wellfobes@timescaledb:5432/fleet
+
+volumes:
+  fleet_pgdata:

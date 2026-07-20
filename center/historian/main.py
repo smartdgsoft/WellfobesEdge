@@ -96,23 +96,46 @@ class Historian:
 class TimescaleWriter:
     """Writes each resolved metric to the edge_values hypertable. Uses a tiny
     synchronous psycopg connection for Phase 1 simplicity; batching/back-pressure
-    is a Phase-2/5 concern (WEP-001 §7.4, §9)."""
-    def __init__(self):
+    is a Phase-2/5 concern (WEP-001 §7.4, §9).
+
+    Waits for the DB to be reachable at startup (containers race), and reconnects
+    if the connection drops, so the historian doesn't die on a transient blip."""
+    def __init__(self, connect_timeout_s: int = 60):
+        self._conn = None
+        self._connect_with_retry(connect_timeout_s)
+
+    def _connect_with_retry(self, timeout_s: int):
         import psycopg2
-        self.conn = psycopg2.connect(PG_DSN)
-        self.conn.autocommit = True
+        deadline = time.time() + timeout_s
+        last = None
+        while time.time() < deadline:
+            try:
+                self._conn = psycopg2.connect(PG_DSN)
+                self._conn.autocommit = True
+                print("[historian] connected to database", flush=True)
+                return
+            except Exception as exc:                       # DB not up yet
+                last = exc
+                print("[historian] waiting for database…", flush=True)
+                time.sleep(2)
+        raise RuntimeError(f"could not reach database within {timeout_s}s: {last}")
 
     def __call__(self, key: MetricKey, value: Optional[float],
                  quality: Optional[int], ts_ms: int):
         if value is None:
             return
-        with self.conn.cursor() as cur:
-            cur.execute(
-                """INSERT INTO edge_values
-                       (site, gateway, device, tag, value, quality, ts)
-                   VALUES (%s,%s,%s,%s,%s,%s, to_timestamp(%s/1000.0))""",
-                (key.site, key.gateway, key.device, key.tag,
-                 value, quality, ts_ms))
+        try:
+            with self._conn.cursor() as cur:
+                cur.execute(
+                    """INSERT INTO edge_values
+                           (site, gateway, device, tag, value, quality, ts)
+                       VALUES (%s,%s,%s,%s,%s,%s, to_timestamp(%s/1000.0))""",
+                    (key.site, key.gateway, key.device, key.tag,
+                     value, quality, ts_ms))
+        except Exception as exc:
+            # connection dropped -> reconnect once and retry; never crash the sub
+            print(f"[historian] write failed ({exc}); reconnecting", flush=True)
+            self._connect_with_retry(30)
 
 
 def main():
