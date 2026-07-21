@@ -22,6 +22,7 @@ from wellfobes_contract import (
 from gateway.sources import build_source
 from gateway.buffer import DeliveryBuffer
 from gateway.config_client import ConfigClient, apply_config
+from gateway.status_server import start_status_server
 
 
 SITE = os.getenv("EDGE_SITE", "PLANT12")
@@ -40,6 +41,7 @@ CONFIG_URL = os.getenv("EDGE_CONFIG_URL", "")   # empty -> pure env config (SKU-
 # keeps the center's "last seen" fresh (so a running gateway shows online), and
 # picks up config changes without a restart. 0 disables (pull only on connect).
 CONFIG_POLL_S = float(os.getenv("EDGE_CONFIG_POLL_S", "30"))
+STATUS_PORT = int(os.getenv("EDGE_STATUS_PORT", "8090"))   # local status page; 0 disables
 
 
 class EdgeGateway:
@@ -70,6 +72,8 @@ class EdgeGateway:
         # emit ONLY these tags (empty set = emit nothing). Applied at the source
         # boundary so every source type is filtered by one gate.
         self._allowed_tags: Optional[set] = None
+        self._latest: Dict[str, dict] = {}   # tag -> {value, quality, ts_ms} for the local status page
+        self._started_ms = now_ms()
 
     def _on_connect(self, client, userdata, flags, rc):
         if rc == 0:
@@ -119,6 +123,8 @@ class EdgeGateway:
     def _publish_live(self, device: str, tag: str, value: float,
                       quality: int, ts_ms: int):
         """Live, ephemeral DDATA — QoS 0, no batch_seq, not buffered."""
+        self._latest[f"{device}/{tag}"] = {"device": device, "tag": tag,
+            "value": value, "quality": quality, "ts_ms": ts_ms}
         alias = self._aliases.get(device, {}).get(tag)
         m = Metric(name=tag, value=value, timestamp_ms=ts_ms, alias=alias, quality=quality)
         p = Payload(seq=self.seq.next(), timestamp_ms=now_ms(), metrics=[m])
@@ -138,6 +144,24 @@ class EdgeGateway:
                     metrics=metrics, batch_seq=seq)
         self.client.publish(self.node.ddata_topic(device),
                             self.codec.encode(p), qos=1, retain=False)
+
+    def status(self) -> dict:
+        """Point-in-time health of THIS gateway. Read by the local status page.
+        Depends on nothing external — works for a standalone SKU-1 edge."""
+        batches, rows = self.buffer.depth()
+        return {
+            "site": SITE, "gateway": GATEWAY, "source": SOURCE,
+            "connected": self._connected.is_set(),
+            "broker": f"{BROKER_HOST}:{BROKER_PORT}",
+            "config_version": self._config_version,
+            "config_url": CONFIG_URL or None,
+            "allowed_tags": sorted(self._allowed_tags) if self._allowed_tags is not None else None,
+            "buffer": {"pending_batches": batches, "pending_rows": rows,
+                       "max_rows": BUFFER_MAX_ROWS},
+            "uptime_s": (now_ms() - self._started_ms) // 1000,
+            "tags": sorted(self._latest.values(), key=lambda x: x["tag"]),
+            "now_ms": now_ms(),
+        }
 
     async def _config_poll_loop(self):
         """Periodically re-pull config and re-report running version — the
@@ -182,6 +206,9 @@ class EdgeGateway:
 
     async def run(self):
         self._loop = asyncio.get_event_loop()
+        # Local status page — up immediately, independent of broker/center, so a
+        # technician can see this gateway even when it's disconnected.
+        start_status_server(STATUS_PORT, self.status)
         # Management plane: pull config before we start publishing.
         self._pull_and_apply_config()
         # Reconnecting client: paho auto-reconnects, redelivering on the will/birth.
