@@ -36,6 +36,10 @@ BUFFER_MAX_ROWS = int(os.getenv("EDGE_BUFFER_MAX_ROWS", "500000"))
 FLUSH_INTERVAL_S = float(os.getenv("EDGE_FLUSH_INTERVAL_S", "1.0"))
 BATCH_MAX = int(os.getenv("EDGE_BATCH_MAX", "200"))
 CONFIG_URL = os.getenv("EDGE_CONFIG_URL", "")   # empty -> pure env config (SKU-1)
+# How often to re-pull config + report status (a heartbeat). This does two jobs:
+# keeps the center's "last seen" fresh (so a running gateway shows online), and
+# picks up config changes without a restart. 0 disables (pull only on connect).
+CONFIG_POLL_S = float(os.getenv("EDGE_CONFIG_POLL_S", "30"))
 
 
 class EdgeGateway:
@@ -135,6 +139,21 @@ class EdgeGateway:
         self.client.publish(self.node.ddata_topic(device),
                             self.codec.encode(p), qos=1, retain=False)
 
+    async def _config_poll_loop(self):
+        """Periodically re-pull config and re-report running version — the
+        heartbeat that keeps the center's view of this gateway fresh and lets
+        config changes land without a restart. No-op if polling disabled or no
+        center configured."""
+        if CONFIG_POLL_S <= 0 or not self.config_client.enabled:
+            return
+        while True:
+            await asyncio.sleep(CONFIG_POLL_S)
+            if not self._connected.is_set():
+                continue
+            # run the blocking HTTP pull/report in a thread so we don't stall the
+            # event loop (and thus publishing).
+            await asyncio.to_thread(self._pull_and_apply_config)
+
     def _pull_and_apply_config(self):
         """Pull this gateway's config from the center and apply what we
         understand. Falls back silently to env defaults if the center is
@@ -172,6 +191,7 @@ class EdgeGateway:
         source = build_source(SOURCE)
         seen: Dict[str, set[str]] = {}
         drainer = asyncio.create_task(self._drain_loop())
+        heartbeat = asyncio.create_task(self._config_poll_loop())
         try:
             async for device, tag, value, quality, ts_ms in source.stream():
                 # Tag-set control (management plane): if a config restricts the
@@ -201,6 +221,7 @@ class EdgeGateway:
             # (simulated source never ends; real sources loop)
         finally:
             drainer.cancel()
+            heartbeat.cancel()
 
     def _enqueue(self, device: str, rows: list):
         """Persist a batch to disk (durable). Device travels with each row, so
