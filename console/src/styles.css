@@ -18,29 +18,59 @@ body{
   background:var(--bg); color:var(--ink); font-family:var(--sans);
   font-size:14px; line-height:1.45; -webkit-font-smoothing:antialiased;
 }
-#root{display:flex; flex-direction:column; height:100vh; overflow:hidden}
+#root{height:100vh; overflow:hidden}
 
-/* top bar */
-.top{display:flex; align-items:center; gap:20px; padding:0 20px; height:52px;
-  background:var(--panel); border-bottom:1px solid var(--line); flex-shrink:0}
-.brand{display:flex; align-items:center; gap:9px}
-.brand b{font-weight:700; letter-spacing:-.01em}
-.brand .tag{color:var(--ink-faint); font-size:12px; font-family:var(--mono); letter-spacing:.04em}
-.svc-dot{width:8px;height:8px;border-radius:50%;background:var(--ok);box-shadow:0 0 8px var(--ok)}
+/* ─── shell: fixed left sidebar + content column ─── */
+.shell{display:grid; grid-template-columns:224px 1fr; height:100vh}
+
+.side{background:var(--panel); border-right:1px solid var(--line);
+  display:flex; flex-direction:column; padding:18px 14px; min-width:0}
+.side-brand{display:flex; align-items:center; gap:10px; padding:4px 8px 20px}
+.side-brand b{font-weight:700; letter-spacing:-.01em; display:block; line-height:1.1}
+.side-brand .tag{color:var(--ink-faint); font-size:10.5px; font-family:var(--mono); letter-spacing:.08em}
+.svc-dot{width:9px;height:9px;border-radius:50%;background:var(--ok);box-shadow:0 0 8px var(--ok);flex-shrink:0}
 .svc-dot.down{background:var(--bad);box-shadow:0 0 8px var(--bad)}
-.nav{display:flex; gap:2px; margin-left:8px}
-.nav button{background:none;border:0;color:var(--ink-dim);font:inherit;padding:7px 14px;
-  border-radius:6px;cursor:pointer;letter-spacing:.01em}
-.nav button:hover{color:var(--ink);background:var(--panel-2)}
-.nav button.on{color:var(--ink);background:var(--panel-2)}
-.nav button.on::after{content:"";display:block;height:2px;background:var(--accent);
-  margin:5px -14px -7px;border-radius:2px}
-.clock{margin-left:auto;font-family:var(--mono);color:var(--ink-faint);font-size:12px}
+
+.side-nav{display:flex; flex-direction:column; gap:3px}
+.side-nav button{display:flex; align-items:center; gap:11px; width:100%; text-align:left;
+  background:none; border:0; color:var(--ink-dim); font:inherit; padding:10px 12px;
+  border-radius:8px; cursor:pointer; letter-spacing:.01em}
+.side-nav button .ic{display:flex; color:var(--ink-faint)}
+.side-nav button:hover{color:var(--ink); background:var(--panel-2)}
+.side-nav button:hover .ic{color:var(--ink-dim)}
+.side-nav button.on{color:var(--ink); background:var(--panel-2)}
+.side-nav button.on .ic{color:var(--accent)}
+.side-nav button.on{box-shadow:inset 3px 0 0 var(--accent)}
+
+.side-foot{margin-top:auto; padding:12px 10px 2px; border-top:1px solid var(--line);
+  display:flex; flex-direction:column; gap:7px}
 .live{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--ink-dim);font-family:var(--mono)}
 .live .d{width:6px;height:6px;border-radius:50%;background:var(--ok);animation:pulse 2s infinite}
+.clock{font-family:var(--mono);color:var(--ink-faint);font-size:12px}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
 
-main{flex:1;overflow:auto;padding:20px}
+.content{display:flex; flex-direction:column; min-width:0; overflow:hidden}
+.topstrip{display:flex; align-items:center; gap:12px; height:48px; padding:0 24px;
+  border-bottom:1px solid var(--line); background:var(--bg); flex-shrink:0}
+.crumb{font-size:13px; color:var(--ink); font-weight:600; letter-spacing:.01em}
+.svc-tag{margin-left:auto; font-family:var(--mono); font-size:11px; padding:3px 10px;
+  border-radius:20px; border:1px solid transparent}
+.svc-tag.ok{color:var(--ok); background:rgba(63,208,122,.08); border-color:rgba(63,208,122,.2)}
+.svc-tag.bad{color:var(--bad); background:rgba(255,93,93,.08); border-color:rgba(255,93,93,.2)}
+
+main{flex:1;overflow:auto;padding:24px}
+
+/* responsive: collapse sidebar to a top row on narrow screens */
+@media(max-width:720px){
+  .shell{grid-template-columns:1fr; grid-template-rows:auto 1fr}
+  .side{flex-direction:row; align-items:center; border-right:0; border-bottom:1px solid var(--line);
+    padding:10px 14px; gap:14px; overflow-x:auto}
+  .side-brand{padding:0; flex-shrink:0}
+  .side-nav{flex-direction:row}
+  .side-nav button.on{box-shadow:none}
+  .side-nav button.on::after{content:"";display:block}
+  .side-foot{margin:0 0 0 auto; border-top:0; padding:0; flex-direction:row; gap:12px; align-items:center}
+}
 .view{max-width:1200px;margin:0 auto}
 h2{font-size:13px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-dim);
   font-weight:600;margin:0 0 12px}

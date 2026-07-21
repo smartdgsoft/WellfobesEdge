@@ -9,6 +9,26 @@ const NAV = [
   { id: 'config', label: 'Config' },
 ]
 
+// Minimal line icons (stroke uses currentColor so they follow the active state).
+const ICONS = {
+  fleet: (
+    <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.4">
+      <rect x="2" y="2" width="5" height="5" rx="1" /><rect x="9" y="2" width="5" height="5" rx="1" />
+      <rect x="2" y="9" width="5" height="5" rx="1" /><rect x="9" y="9" width="5" height="5" rx="1" />
+    </svg>
+  ),
+  data: (
+    <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.4">
+      <path d="M2 11l3-4 3 3 4-6 2 3" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  ),
+  config: (
+    <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.4">
+      <path d="M2 4h12M2 8h12M2 12h8" strokeLinecap="round" />
+    </svg>
+  ),
+}
+
 export default function App() {
   const [view, setView] = useState('fleet')
   const [clock, setClock] = useState('')
@@ -41,27 +61,44 @@ export default function App() {
     return () => window.removeEventListener('keydown', onKey)
   }, [])
 
+  const activeLabel = NAV.find(n => n.id === view)?.label ?? ''
+
   return (
     <>
-      <div className="top">
-        <div className="brand">
-          <span className={`svc-dot ${svcUp ? '' : 'down'}`} title={svcUp ? 'center online' : 'center unreachable'} />
-          <b>Wellfobes</b><span className="tag">FLEET&nbsp;CONTROL</span>
-        </div>
-        <div className="nav">
-          {NAV.map(n => (
-            <button key={n.id} className={view === n.id ? 'on' : ''} onClick={() => setView(n.id)}>{n.label}</button>
-          ))}
-        </div>
-        <div className="clock">{clock}</div>
-        <div className="live"><span className="d" />live</div>
-      </div>
+      <div className="shell">
+        <aside className="side">
+          <div className="side-brand">
+            <span className={`svc-dot ${svcUp ? '' : 'down'}`} title={svcUp ? 'center online' : 'center unreachable'} />
+            <div>
+              <b>Wellfobes</b>
+              <span className="tag">FLEET&nbsp;CONTROL</span>
+            </div>
+          </div>
+          <nav className="side-nav">
+            {NAV.map(n => (
+              <button key={n.id} className={view === n.id ? 'on' : ''} onClick={() => setView(n.id)}>
+                <span className="ic" aria-hidden>{ICONS[n.id]}</span>{n.label}
+              </button>
+            ))}
+          </nav>
+          <div className="side-foot">
+            <div className="live"><span className="d" />live</div>
+            <div className="clock">{clock}</div>
+          </div>
+        </aside>
 
-      <main>
-        {view === 'fleet' && <FleetView onOpenGateway={openGateway} />}
-        {view === 'data' && <DataView onOpenData={openData} />}
-        {view === 'config' && <ConfigView onOpenConfig={openConfig} />}
-      </main>
+        <div className="content">
+          <div className="topstrip">
+            <span className="crumb">{activeLabel}</span>
+            <span className={`svc-tag ${svcUp ? 'ok' : 'bad'}`}>{svcUp ? 'center online' : 'center unreachable'}</span>
+          </div>
+          <main>
+            {view === 'fleet' && <FleetView onOpenGateway={openGateway} />}
+            {view === 'data' && <DataView onOpenData={openData} />}
+            {view === 'config' && <ConfigView onOpenConfig={openConfig} />}
+          </main>
+        </div>
+      </div>
 
       <div className={`scrim ${drawer ? 'on' : ''}`} onClick={closeDrawer} />
       <div className={`drawer ${drawer ? 'on' : ''}`}>
