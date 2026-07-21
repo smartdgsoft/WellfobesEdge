@@ -84,7 +84,7 @@ services:
   console:
     build: { context: ./console, dockerfile: Dockerfile }
     depends_on: [config-service]
-    ports: ["3000:80"]     # operator console -> http://localhost:3000
+    ports: ["3100:80"]     # operator console -> http://localhost:3100
 
 volumes:
   fleet_pgdata:
