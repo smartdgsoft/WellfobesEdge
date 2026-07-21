@@ -23,3 +23,6 @@ services:
       - EDGE_GATEWAY=GW-A
       - EDGE_SOURCE=simulated
       - EDGE_KEEPALIVE_S=30
+      # SKU-1 standalone: publish live only. No center here to ack a durable
+      # buffer, so store-and-forward would churn — live is the correct mode.
+      - EDGE_DELIVERY_MODE=live

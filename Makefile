@@ -13,7 +13,9 @@ test-unit:          ## shared contract unit tests (no broker)
 	python3 shared/tests/test_contract.py
 
 test-edge:          ## edge gateway end-to-end (needs a broker on $$MQTT_PORT)
-	python3 edge/tests/test_gateway_e2e.py
+	python3 edge/tests/test_gateway_e2e.py        # SKU-1 live path + RBE
+	python3 edge/tests/test_durability_e2e.py     # SKU-2 store-and-forward: ack/redeliver/dedupe
+	python3 edge/tests/test_tagset_control.py      # config-driven tag allowlist
 
 test-center:        ## historian decode/identity end-to-end (needs a broker)
 	python3 center/tests/test_historian_e2e.py

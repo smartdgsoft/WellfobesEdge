@@ -52,6 +52,18 @@ repos it's a certainty.)
 The boundary *is* the product line: the edge never retains; retention is the
 center's job (WEP-001 §4, "buffer for delivery, never for retrieval").
 
+The SKU is made explicit in config via `EDGE_DELIVERY_MODE` (same binary, both
+SKUs):
+
+- `store_and_forward` (default, SKU-2) — durable buffer → history batch (QoS 1)
+  → center writes + acks → release. Lossless across a partition. **Requires an
+  acking historian on the other end.**
+- `live` (SKU-1) — publish live DDATA (QoS 0, report-by-exception) and nothing
+  else: no buffer, no history batches, no ack subscription, no writable `/data`.
+  This is the correct mode for a standalone edge: with no center to ack, a
+  store-and-forward buffer would only fill to its bound and churn redelivering
+  forever. `edge/docker-compose.edge.yml` sets this.
+
 ## Broker
 
 **Mosquitto** (EPL/EDL, genuinely open source) — the pipe is proven against it,

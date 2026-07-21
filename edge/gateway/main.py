@@ -42,6 +42,22 @@ CONFIG_URL = os.getenv("EDGE_CONFIG_URL", "")   # empty -> pure env config (SKU-
 # picks up config changes without a restart. 0 disables (pull only on connect).
 CONFIG_POLL_S = float(os.getenv("EDGE_CONFIG_POLL_S", "30"))
 STATUS_PORT = int(os.getenv("EDGE_STATUS_PORT", "8090"))   # local status page; 0 disables
+# Delivery mode — which SKU this edge is. The two SKUs run the SAME binary; the
+# mode is what makes the product line explicit in config instead of accidental.
+#   store_and_forward (default, SKU-2): durable buffer -> publish history batch
+#     (QoS 1) -> center writes + acks -> release. Lossless across a partition.
+#     REQUIRES an acker (the historian) on the other end.
+#   live (SKU-1): publish live DDATA (QoS 0, RBE-governed) and nothing else. No
+#     buffer, no history batches, no ack subscription. This is the "acquire ->
+#     publish live to the customer's own broker, no retention" SKU. Without an
+#     acker there is nothing to release a buffer, so a store-and-forward edge
+#     with no center would fill its outbox to the bound and churn redelivering
+#     forever — `live` is the correct mode for a standalone edge.
+DELIVERY_MODE = os.getenv("EDGE_DELIVERY_MODE", "store_and_forward").strip().lower()
+_MODES = ("store_and_forward", "live")
+if DELIVERY_MODE not in _MODES:
+    raise ValueError(
+        f"EDGE_DELIVERY_MODE={DELIVERY_MODE!r} invalid; expected one of {_MODES}")
 
 
 class EdgeGateway:
@@ -61,9 +77,15 @@ class EdgeGateway:
         self.client.on_message = self._on_message      # acks come back here
         self._connected = asyncio.Event()
         self._loop = None
+        self.durable = DELIVERY_MODE == "store_and_forward"
         # Durable history buffer. Survives restart; released only on center ack.
-        os.makedirs(os.path.dirname(BUFFER_PATH) or ".", exist_ok=True)
-        self.buffer = DeliveryBuffer(BUFFER_PATH, max_rows=BUFFER_MAX_ROWS)
+        # Only exists in store-and-forward mode — a live (SKU-1) edge has no
+        # acker, so it runs no buffer at all (and needs no writable /data mount).
+        if self.durable:
+            os.makedirs(os.path.dirname(BUFFER_PATH) or ".", exist_ok=True)
+            self.buffer = DeliveryBuffer(BUFFER_PATH, max_rows=BUFFER_MAX_ROWS)
+        else:
+            self.buffer = None
         self._inflight: set[int] = set()   # batch_seqs published, awaiting ack
         self._pending: Dict[str, list] = {}   # per-device readings not yet buffered
         self.config_client = ConfigClient(CONFIG_URL, SITE, GATEWAY)
@@ -78,8 +100,10 @@ class EdgeGateway:
     def _on_connect(self, client, userdata, flags, rc):
         if rc == 0:
             self._publish_nbirth()
-            # Listen for this gateway's delivery acks (center -> edge).
-            client.subscribe(self.node.dack_topic(), qos=1)
+            # Listen for this gateway's delivery acks (center -> edge). Only in
+            # store-and-forward mode; a live edge sends nothing that gets acked.
+            if self.durable:
+                client.subscribe(self.node.dack_topic(), qos=1)
             # Reconnect = a chance the desired config changed while we were gone.
             # Pull on the loop thread to avoid blocking the MQTT callback.
             if self._loop:
@@ -94,6 +118,8 @@ class EdgeGateway:
     def _on_message(self, client, userdata, msg):
         """Ack handler (paho network thread). Releases the acked batch from the
         durable buffer — the only place buffer rows are deleted after delivery."""
+        if not self.durable or self.buffer is None:
+            return                       # live mode: no buffer to release
         try:
             batch_seq = decode_ack(msg.payload)
         except Exception:
@@ -148,16 +174,22 @@ class EdgeGateway:
     def status(self) -> dict:
         """Point-in-time health of THIS gateway. Read by the local status page.
         Depends on nothing external — works for a standalone SKU-1 edge."""
-        batches, rows = self.buffer.depth()
+        if self.durable and self.buffer is not None:
+            batches, rows = self.buffer.depth()
+            buffer_status = {"pending_batches": batches, "pending_rows": rows,
+                             "max_rows": BUFFER_MAX_ROWS}
+        else:
+            buffer_status = {"enabled": False,
+                             "reason": "live delivery mode (SKU-1): no store-and-forward"}
         return {
             "site": SITE, "gateway": GATEWAY, "source": SOURCE,
+            "delivery_mode": DELIVERY_MODE,
             "connected": self._connected.is_set(),
             "broker": f"{BROKER_HOST}:{BROKER_PORT}",
             "config_version": self._config_version,
             "config_url": CONFIG_URL or None,
             "allowed_tags": sorted(self._allowed_tags) if self._allowed_tags is not None else None,
-            "buffer": {"pending_batches": batches, "pending_rows": rows,
-                       "max_rows": BUFFER_MAX_ROWS},
+            "buffer": buffer_status,
             "uptime_s": (now_ms() - self._started_ms) // 1000,
             "tags": sorted(self._latest.values(), key=lambda x: x["tag"]),
             "now_ms": now_ms(),
@@ -217,7 +249,9 @@ class EdgeGateway:
 
         source = build_source(SOURCE)
         seen: Dict[str, set[str]] = {}
-        drainer = asyncio.create_task(self._drain_loop())
+        # The drain loop only exists in store-and-forward mode — it flushes and
+        # redelivers the durable buffer. A live edge has no buffer to drain.
+        drainer = asyncio.create_task(self._drain_loop()) if self.durable else None
         heartbeat = asyncio.create_task(self._config_poll_loop())
         try:
             async for device, tag, value, quality, ts_ms in source.stream():
@@ -241,13 +275,16 @@ class EdgeGateway:
                     # that's fine, history (below) is the durable copy.
                     if self._connected.is_set():
                         self._publish_live(device, tag, value, quality, ts_ms)
-                    # HISTORY path: accumulate into a durable batch.
-                    self._pending.setdefault(device, []).append((tag, value, quality, ts_ms))
-                    if len(self._pending[device]) >= BATCH_MAX:
-                        self._enqueue(device, self._pending.pop(device))
+                    # HISTORY path: accumulate into a durable batch. Store-and-
+                    # forward only — a live edge keeps nothing past the live send.
+                    if self.durable:
+                        self._pending.setdefault(device, []).append((tag, value, quality, ts_ms))
+                        if len(self._pending[device]) >= BATCH_MAX:
+                            self._enqueue(device, self._pending.pop(device))
             # (simulated source never ends; real sources loop)
         finally:
-            drainer.cancel()
+            if drainer:
+                drainer.cancel()
             heartbeat.cancel()
 
     def _enqueue(self, device: str, rows: list):
