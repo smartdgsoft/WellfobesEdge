@@ -62,6 +62,10 @@ class EdgeGateway:
         self._pending: Dict[str, list] = {}   # per-device readings not yet buffered
         self.config_client = ConfigClient(CONFIG_URL, SITE, GATEWAY)
         self._config_version: Optional[int] = None
+        # Tag allowlist from config. None = no restriction (pass all); a set =
+        # emit ONLY these tags (empty set = emit nothing). Applied at the source
+        # boundary so every source type is filtered by one gate.
+        self._allowed_tags: Optional[set] = None
 
     def _on_connect(self, client, userdata, flags, rc):
         if rc == 0:
@@ -143,6 +147,13 @@ class EdgeGateway:
                 self.rbe.keepalive_s = applied["keepalive_s"]
             if "deadband" in applied:
                 self.rbe.deadband = applied["deadband"]
+            # Tag-set control: an explicit `tags` key (even []) restricts what
+            # this gateway emits. Absent key -> no restriction (pass all).
+            if "tags" in applied:
+                self._allowed_tags = set(applied["tags"])
+                print(f"[config] tag allowlist -> {sorted(self._allowed_tags) or '(none: gateway silent)'}", flush=True)
+            else:
+                self._allowed_tags = None
             self._config_version = version
             print(f"[config] applied version {version}: {applied}", flush=True)
         else:
@@ -163,6 +174,11 @@ class EdgeGateway:
         drainer = asyncio.create_task(self._drain_loop())
         try:
             async for device, tag, value, quality, ts_ms in source.stream():
+                # Tag-set control (management plane): if a config restricts the
+                # tag set, drop anything not on the allowlist BEFORE it births,
+                # buffers, or publishes. None => no restriction.
+                if self._allowed_tags is not None and tag not in self._allowed_tags:
+                    continue
                 tags = seen.setdefault(device, set())
                 if tag not in tags:
                     tags.add(tag)

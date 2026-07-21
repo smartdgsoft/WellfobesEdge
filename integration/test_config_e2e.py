@@ -30,6 +30,11 @@ def test():
     assert a12["tags"] != a30["tags"], "bespoke configs must differ"
     print("  ✓ each gateway pulls + applies its own bespoke config")
 
+    # tag-set control: the pulled config's tags become the gateway's allowlist
+    assert set(a12["tags"]) == {"sim_level"}, a12["tags"]
+    assert set(a30["tags"]) == {"temp", "flow"}, a30["tags"]
+    print("  ✓ pulled config yields the per-site tag allowlist (drives acquisition)")
+
     # report actual versions, then check fleet convergence
     c.post("/status/PLANT12/GW-A", json={"running_version": v12})
     c.post("/status/PLANT30/GW-A", json={"running_version": v30})
