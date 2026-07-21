@@ -44,7 +44,8 @@ services:
     depends_on: [mqtt, config-service]
     volumes:
       - edge_buffer:/data
-
+    ports: ["8090:8090"]
+    
   edge-gateway-plant30:
     build: { context: ., dockerfile: edge/Dockerfile }
     depends_on: [mqtt, config-service]
@@ -59,7 +60,8 @@ services:
       - EDGE_CONFIG_URL=http://config-service:8080
     volumes:
       - edge_buffer_p30:/data
-
+    ports: ["8090:8090"]
+    
   historian:
     build: { context: ., dockerfile: center/Dockerfile }
     depends_on:
