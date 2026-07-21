@@ -81,6 +81,11 @@ services:
     environment:
       - POSTGRES_DSN=postgresql://wellfobes:wellfobes@timescaledb:5432/fleet
 
+  console:
+    build: { context: ./console, dockerfile: Dockerfile }
+    depends_on: [config-service]
+    ports: ["3000:80"]     # operator console -> http://localhost:3000
+
 volumes:
   fleet_pgdata:
   edge_buffer:

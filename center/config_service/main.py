@@ -29,6 +29,13 @@ PG_DSN = os.getenv("POSTGRES_DSN", "").replace("postgresql+asyncpg://", "postgre
 
 app = FastAPI(title="Wellfobes Fleet — Config Service")
 
+# The operator console runs as a separate app (console/) on its own origin, so
+# the API must allow cross-origin calls. Permissive here for dev; tighten
+# allow_origins to the console's real origin in production.
+from fastapi.middleware.cors import CORSMiddleware
+app.add_middleware(
+    CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+
 
 def _conn():
     # Short-lived connections keep this simple and resilient; config traffic is
@@ -140,6 +147,63 @@ def fleet():
               LEFT JOIN gateway_status s USING (site, gateway)
              ORDER BY d.site, d.gateway""")
         return {"gateways": cur.fetchall()}
+
+
+# ── console/data: recent readings + per-site summaries ───────────────────────
+@app.get("/sites")
+def sites():
+    """Every site/gateway the historian has seen data from, with row counts and
+    last-seen — the data-plane view (distinct from /fleet's config view)."""
+    with _conn() as c, c.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute("""
+            SELECT site, gateway,
+                   count(*)            AS readings,
+                   count(DISTINCT tag) AS tags,
+                   max(ts)             AS last_reading
+              FROM edge_values
+             GROUP BY site, gateway
+             ORDER BY site, gateway""")
+        return {"sites": cur.fetchall()}
+
+
+@app.get("/data/{site}/{gateway}/latest")
+def latest(site: str, gateway: str):
+    """Most recent value per tag for a gateway — the live snapshot."""
+    with _conn() as c, c.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute("""
+            SELECT DISTINCT ON (device, tag)
+                   device, tag, value, quality, ts
+              FROM edge_values
+             WHERE site=%s AND gateway=%s
+             ORDER BY device, tag, ts DESC""", (site, gateway))
+        return {"site": site, "gateway": gateway, "tags": cur.fetchall()}
+
+
+@app.get("/data/{site}/{gateway}/series")
+def series(site: str, gateway: str, tag: str, limit: int = 200):
+    """Recent time series for one tag — for the chart. Newest-first, capped."""
+    with _conn() as c, c.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute("""
+            SELECT ts, value
+              FROM edge_values
+             WHERE site=%s AND gateway=%s AND tag=%s
+             ORDER BY ts DESC
+             LIMIT %s""", (site, gateway, tag, min(limit, 2000)))
+        rows = cur.fetchall()
+    return {"site": site, "gateway": gateway, "tag": tag,
+            "points": list(reversed(rows))}
+
+
+@app.get("/config/{site}/{gateway}/history")
+def config_history(site: str, gateway: str):
+    """All config versions for a gateway — for the config panel's version list."""
+    with _conn() as c, c.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute("""
+            SELECT version, config, note, created_at
+              FROM site_config
+             WHERE site=%s AND gateway=%s
+             ORDER BY version DESC""", (site, gateway))
+        return {"site": site, "gateway": gateway, "versions": cur.fetchall()}
 
 
 @app.get("/healthz")
