@@ -41,6 +41,10 @@ services:
       - EDGE_KEEPALIVE_S=30
       - EDGE_BUFFER_PATH=/data/outbox.db   # durable buffer (survives restart)
       - EDGE_CONFIG_URL=http://config-service:8080   # management plane
+      # Centered: release only when the historian has COMMITTED to TimescaleDB.
+      # Stronger than a broker PUBACK, which would not survive the historian
+      # dying between broker receipt and the DB write.
+      - EDGE_ACK_MODE=center
     depends_on: [mqtt, config-service]
     volumes:
       - edge_buffer:/data
@@ -58,9 +62,12 @@ services:
       - EDGE_KEEPALIVE_S=30
       - EDGE_BUFFER_PATH=/data/outbox.db
       - EDGE_CONFIG_URL=http://config-service:8080
+      - EDGE_ACK_MODE=center
     volumes:
       - edge_buffer_p30:/data
-    ports: ["8090:8090"]
+    # Distinct host port: each gateway publishes its own status page, and two
+    # services cannot share 8090 on the host (the loser stays in "Created").
+    ports: ["8091:8090"]
     
   historian:
     build: { context: ., dockerfile: center/Dockerfile }

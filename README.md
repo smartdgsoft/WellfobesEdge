@@ -52,17 +52,21 @@ repos it's a certainty.)
 The boundary *is* the product line: the edge never retains; retention is the
 center's job (WEP-001 §4, "buffer for delivery, never for retrieval").
 
-The SKU is made explicit in config via `EDGE_DELIVERY_MODE` (same binary, both
-SKUs):
+The edge **always** does store-and-forward — acquire, persist, deliver, release
+on confirmation. That does not vary by deployment: a standalone edge needs it
+*more* than a centered one, because there is no historian to backfill from.
 
-- `store_and_forward` (default, SKU-2) — durable buffer → history batch (QoS 1)
-  → center writes + acks → release. Lossless across a partition. **Requires an
-  acking historian on the other end.**
-- `live` (SKU-1) — publish live DDATA (QoS 0, report-by-exception) and nothing
-  else: no buffer, no history batches, no ack subscription, no writable `/data`.
-  This is the correct mode for a standalone edge: with no center to ack, a
-  store-and-forward buffer would only fill to its bound and churn redelivering
-  forever. `edge/docker-compose.edge.yml` sets this.
+What varies is only which signal confirms delivery (`EDGE_ACK_MODE`):
+
+- `broker` (default) — the broker's QoS 1 PUBACK. Requires no center, so a
+  standalone edge feeding a customer's own broker/MES is fully lossless across
+  an outage. `edge/docker-compose.edge.yml` uses this.
+- `center` — the historian's DACK, i.e. the row is committed in TimescaleDB.
+  Strictly stronger: it survives the broker accepting a message and the
+  historian then dying before its write. `docker-compose.full.yml` uses this.
+
+This is a durability level, not a product SKU — both deployments run the same
+code path.
 
 ## Broker
 

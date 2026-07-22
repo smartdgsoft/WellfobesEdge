@@ -12,10 +12,9 @@ os.environ.update({"MQTT_HOST":"localhost","MQTT_PORT":PORT,
     "EDGE_BUFFER_PATH": tempfile.mkdtemp()+"/outbox.db",
     "EDGE_SITE":"PLANT30","EDGE_GATEWAY":"GW-B","EDGE_SOURCE":"simulated",
     "EDGE_KEEPALIVE_S":"2","EDGE_DEADBAND":"0",
-    # This is the SKU-1 / live-path test: RBE governs the live stream and there
-    # is no historian here to ack. Durability (buffer, redelivery, ack-release)
-    # has its own test — test_durability_e2e.py — with a real acker.
-    "EDGE_DELIVERY_MODE":"live"})
+    # Standalone edge, no historian: ACK_MODE=broker means the broker's PUBACK
+    # confirms delivery, so store-and-forward works with no center at all.
+    "EDGE_ACK_MODE":"broker"})
 
 # load the real gateway module
 here = os.path.dirname(__file__)
@@ -65,11 +64,11 @@ async def main():
     counts = Counter(p for p, _ in live)
     assert counts["PLANT30/GW-B/SiemensPlc1200/sim_running"] <= 3, "constant tag should stay sparse"
 
-    # Live mode is the standalone SKU-1: it must emit NO durable history batches
-    # (nothing here would ever ack them). This locks in the delivery-mode split.
-    assert not history, f"live mode must not emit history batches, saw {len(history)}"
-    print("  \u2713 all tags arrived with full identity; RBE kept the constant tag sparse; "
-          "live mode emitted no history")
+    # A standalone edge still does full store-and-forward: history batches ARE
+    # emitted with no center present. This is the point of ACK_MODE=broker.
+    assert history, "standalone edge must still buffer and publish history batches"
+    print(f"  \u2713 all tags arrived with full identity; RBE kept the constant tag sparse; "
+          f"standalone still store-and-forwarded ({len(history)} history rows)")
 
 if __name__ == "__main__":
     asyncio.run(main()); print("\n\u2705 edge gateway works end-to-end (edge + shared only)")

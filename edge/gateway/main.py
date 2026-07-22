@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import os
 import signal
+import threading
 from typing import Dict, Optional
 
 import paho.mqtt.client as mqtt
@@ -42,22 +43,27 @@ CONFIG_URL = os.getenv("EDGE_CONFIG_URL", "")   # empty -> pure env config (SKU-
 # picks up config changes without a restart. 0 disables (pull only on connect).
 CONFIG_POLL_S = float(os.getenv("EDGE_CONFIG_POLL_S", "30"))
 STATUS_PORT = int(os.getenv("EDGE_STATUS_PORT", "8090"))   # local status page; 0 disables
-# Delivery mode — which SKU this edge is. The two SKUs run the SAME binary; the
-# mode is what makes the product line explicit in config instead of accidental.
-#   store_and_forward (default, SKU-2): durable buffer -> publish history batch
-#     (QoS 1) -> center writes + acks -> release. Lossless across a partition.
-#     REQUIRES an acker (the historian) on the other end.
-#   live (SKU-1): publish live DDATA (QoS 0, RBE-governed) and nothing else. No
-#     buffer, no history batches, no ack subscription. This is the "acquire ->
-#     publish live to the customer's own broker, no retention" SKU. Without an
-#     acker there is nothing to release a buffer, so a store-and-forward edge
-#     with no center would fill its outbox to the bound and churn redelivering
-#     forever — `live` is the correct mode for a standalone edge.
-DELIVERY_MODE = os.getenv("EDGE_DELIVERY_MODE", "store_and_forward").strip().lower()
-_MODES = ("store_and_forward", "live")
-if DELIVERY_MODE not in _MODES:
+
+# The edge ALWAYS does store-and-forward. That is its job and it does not vary
+# by deployment: acquire -> persist -> deliver -> release on confirmation. A
+# standalone edge needs this MORE than a centered one, not less, because there
+# is no historian to backfill from later.
+#
+# What varies is only which signal counts as "delivered":
+#   broker (default) -- the broker's QoS 1 PUBACK. The broker has taken
+#     ownership of the message. Needs no center, so it works identically for a
+#     standalone edge feeding a customer's own broker/MES and for a full stack.
+#   center -- the historian's DACK, i.e. the row is committed in TimescaleDB.
+#     A strictly stronger, end-to-end guarantee: it survives the broker
+#     accepting a message and the historian then dying before the DB write.
+#     Requires a historian; if none is acking, batches are correctly retained.
+#
+# This is a durability level, not a product SKU. Both SKUs run the same path.
+ACK_MODE = os.getenv("EDGE_ACK_MODE", "broker").strip().lower()
+_ACK_MODES = ("broker", "center")
+if ACK_MODE not in _ACK_MODES:
     raise ValueError(
-        f"EDGE_DELIVERY_MODE={DELIVERY_MODE!r} invalid; expected one of {_MODES}")
+        f"EDGE_ACK_MODE={ACK_MODE!r} invalid; expected one of {_ACK_MODES}")
 
 
 class EdgeGateway:
@@ -74,19 +80,22 @@ class EdgeGateway:
         self.client.will_set(self.node.ndeath_topic(),
                              self.codec.encode(death), qos=1, retain=False)
         self.client.on_connect = self._on_connect
-        self.client.on_message = self._on_message      # acks come back here
+        self.client.on_message = self._on_message      # center DACKs come back here
+        self.client.on_publish = self._on_publish      # broker PUBACKs land here
         self._connected = asyncio.Event()
         self._loop = None
-        self.durable = DELIVERY_MODE == "store_and_forward"
-        # Durable history buffer. Survives restart; released only on center ack.
-        # Only exists in store-and-forward mode — a live (SKU-1) edge has no
-        # acker, so it runs no buffer at all (and needs no writable /data mount).
-        if self.durable:
-            os.makedirs(os.path.dirname(BUFFER_PATH) or ".", exist_ok=True)
-            self.buffer = DeliveryBuffer(BUFFER_PATH, max_rows=BUFFER_MAX_ROWS)
-        else:
-            self.buffer = None
+        # Durable history buffer — ALWAYS on. Survives restart; a batch is freed
+        # only once delivery is confirmed (see ACK_MODE).
+        os.makedirs(os.path.dirname(BUFFER_PATH) or ".", exist_ok=True)
+        self.buffer = DeliveryBuffer(BUFFER_PATH, max_rows=BUFFER_MAX_ROWS)
         self._inflight: set[int] = set()   # batch_seqs published, awaiting ack
+        # PUBACK bookkeeping for ACK_MODE=broker. paho delivers on_publish from
+        # its network thread while we publish from ours, so a PUBACK can land
+        # before we record its mid. _mid_seq maps mid -> batch_seq; _early holds
+        # mids that were confirmed before registration. Guarded by _mid_lock.
+        self._mid_seq: Dict[int, int] = {}
+        self._early: set[int] = set()
+        self._mid_lock = threading.Lock()
         self._pending: Dict[str, list] = {}   # per-device readings not yet buffered
         self.config_client = ConfigClient(CONFIG_URL, SITE, GATEWAY)
         self._config_version: Optional[int] = None
@@ -100,10 +109,10 @@ class EdgeGateway:
     def _on_connect(self, client, userdata, flags, rc):
         if rc == 0:
             self._publish_nbirth()
-            # Listen for this gateway's delivery acks (center -> edge). Only in
-            # store-and-forward mode; a live edge sends nothing that gets acked.
-            if self.durable:
-                client.subscribe(self.node.dack_topic(), qos=1)
+            # Listen for this gateway's delivery acks (center -> edge). Always
+            # subscribed: a center may or may not be present, and if one is it
+            # costs nothing to hear it. ACK_MODE decides whether we act on it.
+            client.subscribe(self.node.dack_topic(), qos=1)
             # Reconnect = a chance the desired config changed while we were gone.
             # Pull on the loop thread to avoid blocking the MQTT callback.
             if self._loop:
@@ -116,18 +125,18 @@ class EdgeGateway:
                 self._connected.set()
 
     def _on_message(self, client, userdata, msg):
-        """Ack handler (paho network thread). Releases the acked batch from the
-        durable buffer — the only place buffer rows are deleted after delivery."""
-        if not self.durable or self.buffer is None:
-            return                       # live mode: no buffer to release
+        """Center DACK (paho network thread): the historian has COMMITTED this
+        batch to TimescaleDB. In ACK_MODE=center this is what releases it — a
+        strictly stronger guarantee than PUBACK, which only proves the broker
+        accepted the message and would lose data if the historian then died
+        before its DB write. In ACK_MODE=broker the batch is already gone."""
+        if ACK_MODE != "center":
+            return
         try:
             batch_seq = decode_ack(msg.payload)
         except Exception:
             return
-        freed = self.buffer.ack(batch_seq)
-        self._inflight.discard(batch_seq)
-        if freed:
-            print(f"[gateway] ack batch {batch_seq} -> released {freed} rows", flush=True)
+        self._release(batch_seq, "center")
 
     def _publish_nbirth(self):
         p = Payload(seq=self.seq.reset(), timestamp_ms=now_ms(), metrics=[])
@@ -168,22 +177,51 @@ class EdgeGateway:
                                   alias=alias, quality=quality))
         p = Payload(seq=self.seq.next(), timestamp_ms=now_ms(),
                     metrics=metrics, batch_seq=seq)
-        self.client.publish(self.node.ddata_topic(device),
-                            self.codec.encode(p), qos=1, retain=False)
+        info = self.client.publish(self.node.ddata_topic(device),
+                                   self.codec.encode(p), qos=1, retain=False)
+        if ACK_MODE == "broker":
+            # Tie this mid to the batch so its PUBACK releases it. Handle the
+            # race where on_publish already fired for this mid.
+            with self._mid_lock:
+                if info.mid in self._early:
+                    self._early.discard(info.mid)
+                    confirmed = True
+                else:
+                    self._mid_seq[info.mid] = seq
+                    confirmed = False
+            if confirmed:
+                self._release(seq, "broker")
+
+    def _release(self, batch_seq: int, by: str) -> None:
+        """Free a confirmed batch from the durable buffer."""
+        freed = self.buffer.ack(batch_seq)
+        self._inflight.discard(batch_seq)
+        if freed:
+            print(f"[gateway] batch {batch_seq} confirmed by {by}, "
+                  f"{freed} rows released", flush=True)
+
+    def _on_publish(self, client, userdata, mid):
+        """QoS 1 PUBACK from the broker. In ACK_MODE=broker this is what makes
+        delivery durable — no center required, so a standalone edge gets the
+        same store-and-forward guarantee as a centered one."""
+        if ACK_MODE != "broker":
+            return
+        with self._mid_lock:
+            seq = self._mid_seq.pop(mid, None)
+            if seq is None:
+                self._early.add(mid)     # PUBACK beat registration; publish() will see it
+                return
+        self._release(seq, "broker")
 
     def status(self) -> dict:
         """Point-in-time health of THIS gateway. Read by the local status page.
         Depends on nothing external — works for a standalone SKU-1 edge."""
-        if self.durable and self.buffer is not None:
-            batches, rows = self.buffer.depth()
-            buffer_status = {"pending_batches": batches, "pending_rows": rows,
-                             "max_rows": BUFFER_MAX_ROWS}
-        else:
-            buffer_status = {"enabled": False,
-                             "reason": "live delivery mode (SKU-1): no store-and-forward"}
+        batches, rows = self.buffer.depth()
+        buffer_status = {"pending_batches": batches, "pending_rows": rows,
+                         "max_rows": BUFFER_MAX_ROWS}
         return {
             "site": SITE, "gateway": GATEWAY, "source": SOURCE,
-            "delivery_mode": DELIVERY_MODE,
+            "ack_mode": ACK_MODE,
             "connected": self._connected.is_set(),
             "broker": f"{BROKER_HOST}:{BROKER_PORT}",
             "config_version": self._config_version,
@@ -251,7 +289,7 @@ class EdgeGateway:
         seen: Dict[str, set[str]] = {}
         # The drain loop only exists in store-and-forward mode — it flushes and
         # redelivers the durable buffer. A live edge has no buffer to drain.
-        drainer = asyncio.create_task(self._drain_loop()) if self.durable else None
+        drainer = asyncio.create_task(self._drain_loop())
         heartbeat = asyncio.create_task(self._config_poll_loop())
         try:
             async for device, tag, value, quality, ts_ms in source.stream():
@@ -275,16 +313,15 @@ class EdgeGateway:
                     # that's fine, history (below) is the durable copy.
                     if self._connected.is_set():
                         self._publish_live(device, tag, value, quality, ts_ms)
-                    # HISTORY path: accumulate into a durable batch. Store-and-
-                    # forward only — a live edge keeps nothing past the live send.
-                    if self.durable:
-                        self._pending.setdefault(device, []).append((tag, value, quality, ts_ms))
-                        if len(self._pending[device]) >= BATCH_MAX:
-                            self._enqueue(device, self._pending.pop(device))
+                    # HISTORY path: accumulate into a durable batch. Always on —
+                    # this is the store-and-forward guarantee, same in every
+                    # deployment, standalone or centered.
+                    self._pending.setdefault(device, []).append((tag, value, quality, ts_ms))
+                    if len(self._pending[device]) >= BATCH_MAX:
+                        self._enqueue(device, self._pending.pop(device))
             # (simulated source never ends; real sources loop)
         finally:
-            if drainer:
-                drainer.cancel()
+            drainer.cancel()
             heartbeat.cancel()
 
     def _enqueue(self, device: str, rows: list):

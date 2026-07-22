@@ -8,7 +8,11 @@
 services:
   mqtt:
     image: eclipse-mosquitto:2
-    ports: ["1883:1883"]
+    # No host port publish: the gateway reaches this broker over the compose
+    # network as mqtt:1883. Publishing 1883 to the host clashes with any other
+    # broker already bound there (e.g. a full-stack deployment). Uncomment to
+    # expose it to host tools on a free port, e.g. ["1884:1883"].
+    # ports: ["1884:1883"]
     command: ["sh", "-c", "printf 'listener 1883\\nallow_anonymous true\\n' > /m.conf && exec mosquitto -c /m.conf"]
 
   edge-gateway:
@@ -16,6 +20,8 @@ services:
       context: ..
       dockerfile: edge/Dockerfile
     depends_on: [mqtt]
+    volumes:
+      - edge_buffer_solo:/data
     environment:
       - MQTT_HOST=mqtt
       - MQTT_PORT=1883
@@ -23,6 +29,10 @@ services:
       - EDGE_GATEWAY=GW-A
       - EDGE_SOURCE=simulated
       - EDGE_KEEPALIVE_S=30
-      # SKU-1 standalone: publish live only. No center here to ack a durable
-      # buffer, so store-and-forward would churn — live is the correct mode.
-      - EDGE_DELIVERY_MODE=live
+      - EDGE_BUFFER_PATH=/data/outbox.db
+      # Standalone: full store-and-forward, exactly as in the centered stack.
+      # The broker's QoS 1 PUBACK confirms delivery, so no center is required.
+      - EDGE_ACK_MODE=broker
+
+volumes:
+  edge_buffer_solo:
