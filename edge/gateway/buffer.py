@@ -36,7 +36,15 @@ class DeliveryBuffer:
         # loop appends. A single lock serialises them (SQLite handles the rest).
         self._db = sqlite3.connect(path, check_same_thread=False, isolation_level=None)
         self._db.execute("PRAGMA journal_mode=WAL")      # durable + concurrent-ish
-        self._db.execute("PRAGMA synchronous=NORMAL")    # fsync on WAL checkpoint
+        # synchronous=FULL, not NORMAL. In WAL mode NORMAL does NOT fsync on
+        # commit — SQLite only syncs at checkpoints, so a power cut can roll
+        # back recently committed transactions (the DB stays uncorrupted, but
+        # the rows are gone). An edge gateway loses power abruptly, which is
+        # precisely the case store-and-forward exists to survive, so a batch
+        # must be durable the moment append() returns. Cost is one fsync per
+        # BATCH, not per row, because append() commits as a single explicit
+        # transaction — fewer syncs than the previous autocommit path.
+        self._db.execute("PRAGMA synchronous=FULL")
         self._lock = threading.Lock()
         self._init_schema()
         self._seq = self._max_seq()
@@ -62,17 +70,28 @@ class DeliveryBuffer:
     # ── producer side ────────────────────────────────────────────────────
     def append(self, readings: List[Tuple[str, str, float, int, int]]) -> int:
         """Persist a batch of (device, tag, value, quality, ts_ms). Returns the
-        batch_seq assigned. The rows are on disk (fsync'd at WAL checkpoint)
-        before this returns, so a crash after append but before publish still
-        redelivers them."""
+        batch_seq assigned. The whole batch commits as ONE transaction and is
+        fsync'd (synchronous=FULL) before this returns, so a crash OR power cut
+        after append but before publish still redelivers every row. Atomic too:
+        a partial batch can never be observed after a crash mid-write."""
         with self._lock:
             self._seq += 1
             seq = self._seq
-            self._db.executemany(
-                "INSERT INTO outbox (batch_seq, device, tag, value, quality, ts_ms) "
-                "VALUES (?,?,?,?,?,?)",
-                [(seq, d, t, v, q, ts) for (d, t, v, q, ts) in readings])
-            self._enforce_bound_locked()
+            # Explicit transaction: the connection is in autocommit
+            # (isolation_level=None), so without this each row would be its own
+            # transaction — 200 fsyncs per batch instead of 1.
+            self._db.execute("BEGIN IMMEDIATE")
+            try:
+                self._db.executemany(
+                    "INSERT INTO outbox (batch_seq, device, tag, value, quality, ts_ms) "
+                    "VALUES (?,?,?,?,?,?)",
+                    [(seq, d, t, v, q, ts) for (d, t, v, q, ts) in readings])
+                self._enforce_bound_locked()
+                self._db.execute("COMMIT")
+            except Exception:
+                self._db.execute("ROLLBACK")
+                self._seq -= 1          # seq was never durably used
+                raise
             return seq
 
     def _enforce_bound_locked(self):
